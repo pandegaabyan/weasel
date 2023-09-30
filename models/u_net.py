@@ -6,6 +6,7 @@ from torchmeta import modules
 
 from collections import OrderedDict
 
+
 def initialize_weights(*models):
     for model in models:
         for module in model.modules():
@@ -17,24 +18,28 @@ def initialize_weights(*models):
                 module.weight.data.fill_(1)
                 module.bias.data.zero_()
 
+
 class MetaConvTranspose2d(nn.ConvTranspose2d, modules.MetaModule):
     __doc__ = nn.ConvTranspose2d.__doc__
 
     def forward(self, input, output_size=None, params=None):
-        
+
         if params is None:
             params = OrderedDict(self.named_parameters())
         weights = params.get('weight', None)
         bias = params.get('bias', None)
-        
-        if self.padding_mode != 'zeros':
-            raise ValueError('Only `zeros` padding mode is supported for ConvTranspose2d')
 
-        output_padding = self._output_padding(input, output_size, self.stride, self.padding, self.kernel_size)
+        if self.padding_mode != 'zeros':
+            raise ValueError(
+                'Only `zeros` padding mode is supported for ConvTranspose2d')
+
+        output_padding = self._output_padding(
+            input, output_size, self.stride, self.padding, self.kernel_size)
 
         return F.conv_transpose2d(
             input, weights, bias, self.stride, self.padding,
             output_padding, self.groups, self.dilation)
+
 
 class _MetaEncoderBlock(modules.MetaModule):
 
@@ -43,10 +48,12 @@ class _MetaEncoderBlock(modules.MetaModule):
         super(_MetaEncoderBlock, self).__init__()
 
         layers = [
-            modules.MetaConv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            modules.MetaConv2d(in_channels, out_channels,
+                               kernel_size=3, padding=1),
             modules.MetaBatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-            modules.MetaConv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            modules.MetaConv2d(out_channels, out_channels,
+                               kernel_size=3, padding=1),
             modules.MetaBatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
         ]
@@ -63,6 +70,7 @@ class _MetaEncoderBlock(modules.MetaModule):
 
         return self.encode(x, self.get_subdict(params, 'encode'))
 
+
 class _MetaDecoderBlock(modules.MetaModule):
 
     def __init__(self, in_channels, middle_channels, out_channels):
@@ -71,13 +79,16 @@ class _MetaDecoderBlock(modules.MetaModule):
 
         self.decode = modules.MetaSequential(
             nn.Dropout2d(),
-            modules.MetaConv2d(in_channels, middle_channels, kernel_size=3, padding=1),
+            modules.MetaConv2d(in_channels, middle_channels,
+                               kernel_size=3, padding=1),
             modules.MetaBatchNorm2d(middle_channels),
             nn.ReLU(inplace=True),
-            modules.MetaConv2d(middle_channels, middle_channels, kernel_size=3, padding=1),
+            modules.MetaConv2d(middle_channels, middle_channels,
+                               kernel_size=3, padding=1),
             modules.MetaBatchNorm2d(middle_channels),
             nn.ReLU(inplace=True),
-            MetaConvTranspose2d(middle_channels, out_channels, kernel_size=2, stride=2, padding=0, output_padding=0)
+            MetaConvTranspose2d(middle_channels, out_channels,
+                                kernel_size=2, stride=2, padding=0, output_padding=0)
         )
 
     def forward(self, x, params=None):
@@ -90,7 +101,7 @@ class UNet(modules.MetaModule):
     def __init__(self, input_channels, num_classes, prototype=False):
 
         super(UNet, self).__init__()
-        
+
         self.prototype = prototype
 
         self.enc1 = _MetaEncoderBlock(input_channels, 32)
@@ -114,25 +125,28 @@ class UNet(modules.MetaModule):
 
         if not self.prototype:
             self.final = modules.MetaConv2d(32, num_classes, kernel_size=1)
-        
+
         initialize_weights(self)
 
     def forward(self, x, feat=False, params=None):
-        
+
         enc1 = self.enc1(x, self.get_subdict(params, 'enc1'))
         enc2 = self.enc2(enc1, self.get_subdict(params, 'enc2'))
         enc3 = self.enc3(enc2, self.get_subdict(params, 'enc3'))
-        
+
         center = self.center(enc3, self.get_subdict(params, 'center'))
-        
-        dec3 = self.dec3(torch.cat([center, F.interpolate(enc3, center.size()[2:], mode='bilinear')], 1), self.get_subdict(params, 'dec3'))
-        dec2 = self.dec2(torch.cat([dec3, F.interpolate(enc2, dec3.size()[2:], mode='bilinear')], 1), self.get_subdict(params, 'dec2'))
-        dec1 = self.dec1(torch.cat([dec2, F.interpolate(enc1, dec2.size()[2:], mode='bilinear')], 1), self.get_subdict(params, 'dec1'))
-        
-        if self.prototype: 
+
+        dec3 = self.dec3(torch.cat([center, F.interpolate(enc3, center.size()[
+                         2:], mode='bilinear')], 1), self.get_subdict(params, 'dec3'))
+        dec2 = self.dec2(torch.cat([dec3, F.interpolate(enc2, dec3.size()[
+                         2:], mode='bilinear')], 1), self.get_subdict(params, 'dec2'))
+        dec1 = self.dec1(torch.cat([dec2, F.interpolate(enc1, dec2.size()[
+                         2:], mode='bilinear')], 1), self.get_subdict(params, 'dec1'))
+
+        if self.prototype:
             return F.interpolate(dec1, x.size()[2:], mode='bilinear')
-            
-        else: 
+
+        else:
             final = self.final(dec1, self.get_subdict(params, 'final'))
 
             if feat:
@@ -140,6 +154,6 @@ class UNet(modules.MetaModule):
                         dec1,
                         F.interpolate(dec2, x.size()[2:], mode='bilinear'),
                         F.interpolate(dec3, x.size()[2:], mode='bilinear'),
-                       )
+                        )
             else:
                 return F.interpolate(final, x.size()[2:], mode='bilinear')
