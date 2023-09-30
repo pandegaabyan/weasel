@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+###
+openist.zip
+openist/
+WeaSeL_Pretrained.zip
+weasel_pretrained/
