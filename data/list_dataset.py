@@ -462,13 +462,14 @@ class ListDataset(data.Dataset):
         return img, msk, spl
 
     def norm(self, img):
+        normalized = np.zeros(img.shape)
         if len(img.shape) == 2:
-            img = (img - img.mean()) / img.std()
+            normalized = (img - img.mean()) / img.std()
         else:
             for b in range(img.shape[2]):
-                img[:, :, b] = (
+                normalized[:, :, b] = (
                     img[:, :, b] - img[:, :, b].mean()) / img[:, :, b].std()
-        return img
+        return normalized
 
     def torch_channels(self, img):
         if len(img.shape) == 2:
