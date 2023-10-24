@@ -70,7 +70,7 @@ def get_num_samples(targets, num_classes, dtype=None, ignore_index=-1):
     return num_samples
 
 def get_prototypes(embeddings, targets, num_classes, ignore_index=-1):
-    """Compute the prototypes (the mean vector of the embedded training/support 
+    """Compute the prototypes (the mean vector of the embedded training/support
     points belonging to its class) for each classes in the task.
     Parameters
     ----------
@@ -137,7 +137,7 @@ def prototypical_loss(prototypes, embeddings, targets, **kwargs):
         The negative log-likelihood on the query points.
     """
     squared_distances = torch.sum((prototypes.unsqueeze(2)
-        - embeddings.unsqueeze(1)) ** 2, dim=-1)
+                                   - embeddings.unsqueeze(1)) ** 2, dim=-1)
     return F.cross_entropy(-squared_distances, targets, **kwargs)
 
 def get_predictions(prototypes, embeddings, targets):
@@ -159,14 +159,14 @@ def get_predictions(prototypes, embeddings, targets):
         Mean accuracy on the query points.
     """
     sq_distances = torch.sum((prototypes.unsqueeze(1)
-        - embeddings.unsqueeze(2)) ** 2, dim=-1)
+                              - embeddings.unsqueeze(2)) ** 2, dim=-1)
     _, predictions = torch.min(sq_distances, dim=-1)
     return predictions
 
 
 # Main function.
 def main(args):
-    
+
     # Setting network architecture.
     if (conv_name == 'unet'):
 
@@ -185,7 +185,7 @@ def main(args):
     meta_train_set = [list_dataset.ListDataset('meta_train', d['domain'], d['task'], fold_name, resize_to, num_shots=-1, sparsity_mode='random', imgtype=datainfo['imgtype']) for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
     
     meta_test_set = [list_dataset.ListDataset('meta_test', d['domain'], d['task'], fold_name, resize_to, num_shots=-1, sparsity_mode='dense', imgtype=datainfo['imgtype']) for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
-     
+
     # Setting tuning and testing loaders.
     print('Setting tuning loaders...')
     sys.stdout.flush()
@@ -206,7 +206,7 @@ def main(args):
     
     # Setting scheduler.
     scheduler = optim.lr_scheduler.StepLR(meta_optimizer, args['lr_scheduler_step_size'], gamma=args['lr_scheduler_gamma'], last_epoch=-1)
- 
+
     # Loading optimizer state in case of resuming training.
     if args['snapshot'] == '':
         curr_epoch = 1
@@ -223,8 +223,9 @@ def main(args):
     check_mkdir(outp_path)
     check_mkdir(os.path.join(outp_path, exp_name))
 
+    # Iterating over epochs.
     for epoch in range(curr_epoch, args['epoch_num'] + 1):
-            
+
         # Meta training on source datasets.
         meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, epoch % args['test_freq'] == 0, args)
         
@@ -233,7 +234,6 @@ def main(args):
             run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name)
             
         scheduler.step()
-        
 
 # Training function.
 def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, save_model, args):
@@ -244,9 +244,6 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
     # List for batch losses.
     train_outer_loss_list = list()
     
-    # Lists for whole epoch loss.
-    inps_all, labs_all, prds_all = [], [], []
-
     num_tasks = len(meta_train_set)
     
     n_batches = 5
@@ -258,7 +255,7 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
         perm = np.random.permutation(num_tasks)
         print('Ep: ' + str(epoch) + ', it: ' + str(i + 1) + ', task subset: ' + str(perm[:args['n_metatasks_iter']]))
         sys.stdout.flush()
-                
+
         indices = perm[:args['n_metatasks_iter']]
         
         for index in indices:
@@ -322,7 +319,7 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
     if save_model:
         torch.save(net.state_dict(), os.path.join(ckpt_path, exp_name, 'meta.pth'))
         torch.save(meta_optimizer.state_dict(), os.path.join(ckpt_path, exp_name, 'opt_meta.pth'))
-        
+
     # Printing epoch loss.
     print('--------------------------------------------------------------------')
     print('[epoch %d], [train loss %.4f]' % (

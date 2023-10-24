@@ -66,7 +66,7 @@ def main(args):
     meta_train_set = [list_dataset.ListDataset('meta_train', d['domain'], d['task'], fold_name, resize_to, num_shots=-1, sparsity_mode='random', imgtype=datainfo['imgtype']) for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
     
     meta_test_set = [list_dataset.ListDataset('meta_test', d['domain'], d['task'], fold_name, resize_to, num_shots=-1, sparsity_mode='dense', imgtype=datainfo['imgtype']) for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
-    
+
     # Setting tuning and testing loaders.
     print('Setting tuning loaders...')
     sys.stdout.flush()
@@ -87,7 +87,7 @@ def main(args):
     
     # Setting scheduler.
     scheduler = optim.lr_scheduler.StepLR(meta_optimizer, args['lr_scheduler_step_size'], gamma=args['lr_scheduler_gamma'], last_epoch=-1)
-    
+
     # Loading optimizer state in case of resuming training.
     if args['snapshot'] == '':
         curr_epoch = 1
@@ -103,7 +103,7 @@ def main(args):
     check_mkdir(os.path.join(ckpt_path, exp_name))
     check_mkdir(outp_path)
     check_mkdir(os.path.join(outp_path, exp_name))
-    
+
     # Iterating over epochs.
     for epoch in range(curr_epoch, args['epoch_num'] + 1):
         
@@ -136,7 +136,7 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
         perm = np.random.permutation(num_tasks)
         print('Ep: ' + str(epoch) + ', it: ' + str(i + 1) + ', task subset: ' + str(perm[:args['n_metatasks_iter']]))
         sys.stdout.flush()
-        
+
         indices = perm[:args['n_metatasks_iter']]
         
         # Acquiring training and test data.
@@ -276,7 +276,6 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
 
         tune_train_test(dict_regions['train'], dict_regions['test'], net, meta_optimizer, epoch, args, task_name, 'regions_(%d-shot_%.2f-regions)' % (n_shots, sparsity))
 
-
     # Tuning/testing on skels.
     for dict_skels in loader_dict['skels']:
 
@@ -287,7 +286,6 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
         sys.stdout.flush()
 
         tune_train_test(dict_skels['train'], dict_skels['test'], net, meta_optimizer, epoch, args, task_name, 'skels_(%d-shot_%.2f-skels)' % (n_shots, sparsity))
-
 
     # Tuning/testing on dense.
     for dict_dense in loader_dict['dense']:
@@ -322,14 +320,14 @@ def tune_train_test(tune_train_loader, tune_test_loader, net, meta_optimizer, ep
         for i, data in enumerate(tune_train_loader):
             
             # Obtaining images, dense labels, sparse labels and paths for batch.
-            x_tr, y_dense, y_tr, img_name = data
+            x_tr, _, y_tr, _ = data
             
             # Casting tensors to cuda.
             x_tr, y_tr = x_tr.cuda(), y_tr.cuda()
             
             # Casting to cuda variables.
-            x_tr = Variable(x_tr).cuda()
-            y_tr = Variable(y_tr).cuda()
+            x_tr = x_tr.cuda()
+            y_tr = y_tr.cuda()
             
             # Zeroing gradients for optimizer.
             meta_optimizer.zero_grad()
@@ -362,11 +360,11 @@ def tune_train_test(tune_train_loader, tune_test_loader, net, meta_optimizer, ep
                 for i, data in enumerate(tune_test_loader):
                     
                     # Obtaining images, labels and paths for batch.
-                    x_ts, y_ts, _, img_name = data
+                    x_ts, y_ts, _, _ = data
                     
                     # Casting to cuda variables.
-                    x_ts = Variable(x_ts, volatile=True).cuda()
-                    y_ts = Variable(y_ts, volatile=True).cuda()
+                    x_tr = x_tr.cuda()
+                    y_tr = y_tr.cuda()
                     
                     # Forwarding.
                     p_ts = net(x_ts)
@@ -422,8 +420,8 @@ def tune_train_test(tune_train_loader, tune_test_loader, net, meta_optimizer, ep
             x_ts, y_ts, _, img_name = data
             
             # Casting to cuda variables.
-            x_ts = Variable(x_ts, volatile=True).cuda()
-            y_ts = Variable(y_ts, volatile=True).cuda()
+            x_tr = x_tr.cuda()
+            y_tr = y_tr.cuda()
             
             # Forwarding.
             p_ts = net(x_ts)

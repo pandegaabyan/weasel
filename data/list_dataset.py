@@ -504,7 +504,7 @@ class ListDataset(data.Dataset):
                     msk, sparsity='random', index=index)
 
         # Randomly selecting sparse points.
-        if self.sparsity_mode == 'points':
+        elif self.sparsity_mode == 'points':
             sparse_msk = self.sparse_points(
                 msk, sparsity=self.sparsity_param, index=index)
         elif self.sparsity_mode == 'contours':
