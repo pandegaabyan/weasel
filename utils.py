@@ -17,7 +17,7 @@ def check_mkdir(dir_name):
     if not os.path.exists(dir_name):
         os.mkdir(dir_name)
 
-def prepare_meta_batch(meta_train_set, meta_test_set, index, batch_size=5):
+def prepare_meta_batch(meta_train_set, meta_test_set, index, batch_size=5, use_gpu=True):
     
     # Acquiring training and test data.
     x_train = []
@@ -34,11 +34,16 @@ def prepare_meta_batch(meta_train_set, meta_test_set, index, batch_size=5):
         d_tr = meta_train_set[index][perm_train[b]]
         d_ts = meta_test_set[index][perm_test[b]]
         
-        x_tr = d_tr[0].cuda()
-        y_tr = d_tr[2].cuda()
-        
-        x_ts = d_ts[0].cuda()
-        y_ts = d_ts[1].cuda()
+        x_tr = d_tr[0]
+        y_tr = d_tr[2]
+        x_ts = d_ts[0]
+        y_ts = d_ts[1]
+
+        if use_gpu:
+            x_tr = x_tr.cuda()
+            y_tr = y_tr.cuda()
+            x_ts = x_ts.cuda()
+            y_ts = y_ts.cuda()
         
         x_train.append(x_tr)
         y_train.append(y_tr)
