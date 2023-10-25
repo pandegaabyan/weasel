@@ -135,3 +135,7 @@ WeaSeL_Pretrained.zip
 weasel_pretrained/
 
 .idea
+
+ckpt/
+outputs/
+stored_var/
