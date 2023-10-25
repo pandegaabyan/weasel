@@ -1,14 +1,15 @@
 import os
-import sys
+from typing import Literal
+
 import numpy as np
 import torch
 import random
 
 from torch.utils import data
 
+from sklearn.model_selection import train_test_split
+
 from skimage import io
-from skimage import util
-from skimage import filters
 from skimage import measure
 from skimage import transform
 from skimage import morphology
@@ -17,7 +18,7 @@ from skimage import img_as_float
 from skimage import data as skdata
 
 '''
-# This class ListDataset use the dataset name and task name to load the respectives images accordingly, modify this class to your use case
+# ListDataset use the dataset name and task name to load the respectives images accordingly, modify it to your use case
 # For a simple loader, this version is implemented considering the following folder scheme:
 
 /datasets_root_folder
@@ -46,17 +47,20 @@ from skimage import data as skdata
 '''
 
 # Constants.
-root = 'dataset'  # The /datasets_root_folder/ in the scheme above
+root = 'openist'  # The /datasets_root_folder/ in the scheme above
 
 annot_types = ['points', 'regions', 'skels',
                'contours', 'grid', 'dense', 'random']
+
+all_data = [(f, f.replace('.jpg', '@.png')) for f in os.listdir('openist') if '@' not in f]
 
 # Class that reads a sequence of image paths from a text file and creates a data.Dataset with them.
 
 
 class ListDataset(data.Dataset):
 
-    def __init__(self, mode, dataset, task, fold, resize_to, num_shots=5, sparsity_mode='dense', sparsity_param=None, imgtype='med', make=True):
+    def __init__(self, mode, dataset, task, fold, resize_to, num_shots=5,
+                 sparsity_mode='dense', sparsity_param=None, imgtype='med', make=True):
 
         assert sparsity_mode in annot_types, "{} annotation type not supported, must be one of following {}.".format(
             sparsity_mode, annot_types)
@@ -92,6 +96,34 @@ class ListDataset(data.Dataset):
     # Function that create the list of pairs (img_path, mask_path)
     # Adapt this function for your dataset and fold structure
     def make_dataset(self):
+        # Split the data in train/val
+        tr, ts = train_test_split(all_data, test_size=0.8, random_state=self.fold, shuffle=False)
+
+        # Select split, based on the mode
+        data_list = None
+        if 'train' in self.mode:
+            data_list = tr
+        elif 'test' in self.mode:
+            data_list = ts
+
+        random.seed(self.fold)
+        random.shuffle(data_list)
+
+        # If few-shot, select only a subset of samples
+        if self.num_shots != -1 and self.num_shots <= len(data_list):
+            data_list = data_list[:self.num_shots]
+
+        items = []
+
+        # Creating list containing image and ground truth paths.
+        for it in data_list:
+            item = (os.path.join(self.root, it[0]), os.path.join(self.root, it[1]))
+            items.append(item)
+
+        # Returning list.
+        return items
+
+    def make_dataset_old(self):
 
         # Making sure the mode is correct.
         assert self.mode in ['train', 'test', 'meta_train',
@@ -111,8 +143,7 @@ class ListDataset(data.Dataset):
                                 'ground_truths', self.task)
 
         # Reading paths from file.
-        data_list = []
-        data_list = [l.strip('\n') for l in open(os.path.join(
+        data_list = [line.strip('\n') for line in open(os.path.join(
             self.root, self.dataset, self.task + '_' + mode_str + '_f' + str(self.fold) + '_few_shot.txt')).readlines()]
 
         random.seed(int(self.fold))
@@ -129,195 +160,107 @@ class ListDataset(data.Dataset):
         # Returning list.
         return items
 
-    def sparse_points(self, msk, sparsity='random', index=-1):
+    def sparse_points(self, msk, sparsity: float | Literal["random"] = 'random', index=0):
+        if sparsity != 'random':
+            np.random.seed(index)
+
         # Linearizing mask.
         msk_ravel = msk.ravel()
 
-        # Slicing array for only containing negative class pixels.
-        neg_msk = msk_ravel[msk_ravel == 0]
-        neg_msk[:] = -1
-
-        # Slicing array for only containing positive class pixels.
-        pos_msk = msk_ravel[msk_ravel > 0]
-        pos_msk[:] = -1
-
-        if sparsity == 'random':
-
-            # Randomly choosing sparsity (number of points -- [1..20]).
-            sparsity = np.random.randint(low=1, high=21)
-
-            # Negative mask.
-            # Random permutation of negative pixels.
-            perm_neg = np.random.permutation(neg_msk.shape[0])
-            neg_msk[perm_neg[:min(sparsity, len(perm_neg))]] = 0
-
-            # Positive mask.
-            # Random permutation of positive pixels.
-            perm_pos = np.random.permutation(pos_msk.shape[0])
-            pos_msk[perm_pos[:min(sparsity, len(perm_pos))]] = 1
-
-        elif isinstance(sparsity, int) and sparsity > 0:
-
-            # Predetermined sparsity (number of labeled points of each class).
-            pass
-
-            # Negative mask.
-            np.random.seed(index)
-            # Predetermined permutation of negative pixels (fixed by seed).
-            perm_neg = np.random.permutation(neg_msk.shape[0])
-            neg_msk[perm_neg[:min(sparsity, len(perm_neg))]] = 0
-
-            # Positive mask.
-            np.random.seed(index)
-            # Predetermined permutation of positive pixels (fixed by seed).
-            perm_pos = np.random.permutation(pos_msk.shape[0])
-            pos_msk[perm_pos[:min(sparsity, len(perm_pos))]] = 1
-
-        # Merging negative and positive sparse masks.
+        # Copying raveled mask and starting it with -1 for inserting sparsity.
         new_msk = np.zeros(msk_ravel.shape[0], dtype=np.int64)
         new_msk[:] = -1
 
-        new_msk[msk_ravel == 0] = neg_msk
-        new_msk[msk_ravel > 0] = pos_msk
+        for c in range(self.num_classes):
+            # Slicing array for only containing class "c" pixels.
+            msk_class = new_msk[msk_ravel == c]
+
+            # Random permutation of class "c" pixels.
+            perm = np.random.permutation(msk_class.shape[0])
+            sparsity_num = round(sparsity) if sparsity != "random" else np.random.randint(low=1, high=len(perm))
+            msk_class[perm[:min(sparsity_num, len(perm))]] = c
+
+            # Merging sparse masks.
+            new_msk[msk_ravel == c] = msk_class
 
         # Reshaping linearized sparse mask to the original 2 dimensions.
         new_msk = new_msk.reshape(msk.shape)
 
         return new_msk
 
-    def sparse_grid(self, msk, sparsity='random', index=-1):
+    @staticmethod
+    def sparse_grid(msk, sparsity: float | Literal["random"] = 'random', index=0):
         # Copying mask and starting it with -1 for inserting sparsity.
         new_msk = np.zeros_like(msk)
         new_msk[:, :] = -1
 
         if sparsity == 'random':
+            # Random sparsity (x and y point spacing).
+            max_high = int(np.max(msk.shape)/2)
+            spacing_value = np.random.randint(low=1, high=max_high)
+            spacing = (spacing_value, spacing_value)
 
-            # Random sparsity (x and y point spacing -- [8..20]).
-            spacing = (np.random.randint(low=8, high=21),
-                       np.random.randint(low=8, high=21))
-
-            # Random starting offset.
-            starting = (np.random.randint(spacing[0]),
-                        np.random.randint(spacing[1]))
-
-        elif isinstance(sparsity, int) and sparsity > 0:
-
+        else:
             # Predetermined sparsity (x and y point spacing).
             spacing = (int(2 ** sparsity),
                        int(2 ** sparsity))
 
             np.random.seed(index)
 
-            # Predetermined starting offset (fixed by seed).
-            starting = (np.random.randint(spacing[0]),
-                        np.random.randint(spacing[1]))
+        starting = (np.random.randint(spacing[0]),
+                    np.random.randint(spacing[1]))
 
-        new_msk[starting[0]::spacing[0],
-                starting[1]::spacing[1]] = msk[starting[0]::spacing[0],
-                                               starting[1]::spacing[1]]
+        new_msk[starting[0]::spacing[0], starting[1]::spacing[1]] = \
+            msk[starting[0]::spacing[0], starting[1]::spacing[1]]
 
         return new_msk
 
-    def sparse_contours(self, msk, sparsity='random', index=-1):
-        if sparsity == 'random':
+    def sparse_contours(self, msk, sparsity: float | Literal["random"] = 'random', index=0):
+        sparsity_num = sparsity if sparsity != "random" else np.random.random()
 
-            # Randomly choosing sparsity (contour proportion -- [0..1]).
-            sparsity = np.random.random()
-
-            # Random disk radius for erosions and dilations from the original mask.
-            radius_dist = np.random.randint(low=3, high=10)
-
-            # Random disk radius for annotation thickness.
-            radius_thick = np.random.randint(low=1, high=2)
-
-            # Creating morphology elements.
-            selem_dist = morphology.disk(radius_dist)
-            selem_thick = morphology.disk(radius_thick)
-
-            # Dilating and eroding original mask and obtaining contours.
-            msk_neg = morphology.binary_dilation(msk > 0, selem_dist)
-            msk_pos = morphology.binary_erosion(msk > 0, selem_dist)
-
-            pos_contr = measure.find_contours(msk_pos, 0.0)
-            neg_contr = measure.find_contours(msk_neg, 0.0)
-
-            # Instantiating masks for the boundaries.
-            msk_neg_bound = np.zeros_like(msk_neg)
-            msk_pos_bound = np.zeros_like(msk_pos)
-
-            # Filling boundary masks.
-            for i, obj in enumerate(pos_contr):
-                # Random rotation of contour.
-                rand_rot = np.random.randint(low=1, high=len(obj))
-                for j, contour in enumerate(np.roll(obj, rand_rot, axis=0)):
-                    if j < round(len(obj) * sparsity):
-                        msk_pos_bound[int(contour[0]), int(contour[1])] = 1
-
-            for i, obj in enumerate(neg_contr):
-                # Random rotation of contour.
-                rand_rot = np.random.randint(low=1, high=len(obj))
-                for j, contour in enumerate(np.roll(obj, rand_rot, axis=0)):
-                    if j < round(len(obj) * sparsity):
-                        msk_neg_bound[int(contour[0]), int(contour[1])] = 1
-
-        elif isinstance(sparsity, float) and sparsity > 0:
-
-            # Fixing seed.
+        if sparsity != 'random':
             np.random.seed(index)
 
-            # Predefined disk radius for erosions and dilations from the original mask (fixed by seed).
-            radius_dist = np.random.randint(low=3, high=10)
+        new_msk = np.zeros_like(msk)
 
-            # Predefined disk radius for annotation thickness (fixed by seed).
-            radius_thick = np.random.randint(low=1, high=2)
+        # Random disk radius for erosions and dilations from the original mask.
+        radius_dist = np.random.randint(low=4, high=10)
 
-            # Creating morphology elements.
-            selem_dist = morphology.disk(radius_dist)
-            selem_thick = morphology.disk(radius_thick)
+        # Random disk radius for annotation thickness.
+        radius_thick = 1
 
-            # Dilating and eroding original mask and obtaining contours.
-            msk_neg = morphology.binary_dilation(msk > 0, selem_dist)
-            msk_pos = morphology.binary_erosion(msk > 0, selem_dist)
+        # Creating morphology elements.
+        selem_dist = morphology.disk(radius_dist)
+        selem_thick = morphology.disk(radius_thick)
 
-            pos_contr = measure.find_contours(msk_pos, 0.0)
-            neg_contr = measure.find_contours(msk_neg, 0.0)
+        for c in range(self.num_classes):
+            # Eroding original mask and obtaining contours.
+            msk_class = morphology.binary_erosion(msk == c, selem_dist)
+            msk_contr = measure.find_contours(msk_class, 0.0)
 
             # Instantiating masks for the boundaries.
-            msk_neg_bound = np.zeros_like(msk_neg)
-            msk_pos_bound = np.zeros_like(msk_pos)
+            msk_bound = np.zeros_like(msk)
 
             # Filling boundary masks.
-            for i, obj in enumerate(pos_contr):
-                np.random.seed(index)
-                # Predefined rotation of contour (fixed by seed).
-                rand_rot = np.random.randint(low=1, high=len(obj))
-                for j, contour in enumerate(np.roll(obj, rand_rot, axis=0)):
-                    if j < max(1, round(len(obj) * sparsity)):
-                        msk_pos_bound[int(contour[0]), int(contour[1])] = 1
+            for _, contour in enumerate(msk_contr):
+                rand_rot = np.random.randint(low=1, high=len(contour))
+                for j, coord in enumerate(np.roll(contour, rand_rot, axis=0)):
+                    if j < max(1, min(round(len(contour) * sparsity_num), len(contour))):
+                        msk_bound[int(coord[0]), int(coord[1])] = c+1
 
-            for i, obj in enumerate(neg_contr):
-                np.random.seed(index)
-                # Predefined rotation of contour (fixed by seed).
-                rand_rot = np.random.randint(low=1, high=len(obj))
-                for j, contour in enumerate(np.roll(obj, rand_rot, axis=0)):
-                    if j < max(1, round(len(obj) * sparsity)):
-                        msk_neg_bound[int(contour[0]), int(contour[1])] = 1
+            # Dilating boundary masks to make them thicker.
+            msk_bound = morphology.dilation(msk_bound, footprint=selem_thick)
 
-        # Performing dilation on the boundary masks for adding thickness.
-        msk_neg_bound = morphology.dilation(msk_neg_bound, selem=selem_thick)
-        msk_pos_bound = morphology.dilation(msk_pos_bound, selem=selem_thick)
+            # Removing invalid boundary masks.
+            msk_bound = msk_bound * (msk == c)
 
-        # Grouping positive, negative and negatively labeled pixels.
-        new_msk = np.zeros_like(msk, dtype=np.int8)
-        new_msk[:] = -1
-        new_msk[msk_neg_bound] = 0
-        new_msk[msk_pos_bound] = 1
+            # Merging boundary masks.
+            new_msk += msk_bound
 
-        return new_msk
+        return new_msk - 1
 
-    def sparse_skels(self, msk, sparsity='random', index=-1):
-        if sparsity == 'random':
-            sparsity = np.random.random()
+    def sparse_skels(self, msk, sparsity: float | Literal["random"] = 'random', index=0):
+        sparsity_num = sparsity if sparsity != "random" else np.random.random()
 
         bseed = None  # Blobs generator seed
         if 'tune' in self.mode:
@@ -334,19 +277,21 @@ class ListDataset(data.Dataset):
         for c in range(self.num_classes):
             c_msk = (msk == c)
             c_skel = morphology.skeletonize(c_msk)
-            c_msk = morphology.binary_dilation(c_skel, selem=selem_thick)
+            c_msk = morphology.binary_dilation(c_skel, footprint=selem_thick)
 
             new_msk[c_msk] = c
 
-        blobs = skdata.binary_blobs(new_msk.shape[0], blob_size_fraction=0.1,
-                                    volume_fraction=sparsity, seed=bseed)
+        blobs = skdata.binary_blobs(np.max(new_msk.shape), blob_size_fraction=0.1,
+                                    volume_fraction=sparsity_num, seed=bseed)
+        blobs = blobs[:new_msk.shape[0], :new_msk.shape[1]]
+
         n_sp = np.zeros_like(new_msk)
         n_sp[:] = -1
         n_sp[blobs] = new_msk[blobs]
 
         return n_sp
 
-    def sparse_region(self, img, msk, sparsity='random', index=-1):
+    def sparse_region(self, img, msk, sparsity: float | Literal["random"] = 'random', index=0):
         # Compactness of SLIC for each dataset.
         cpn = {
             # MEDICAL
@@ -362,6 +307,12 @@ class ListDataset(data.Dataset):
             'mias': 0.45
         }
 
+        if sparsity != "random":
+            # Fixing seed.
+            np.random.seed(index)
+
+        sparsity_num = sparsity if sparsity != "random" else np.random.random()
+
         # Copying mask and starting it with -1 for inserting sparsity.
         new_msk = np.zeros_like(msk)
         new_msk[:] = -1
@@ -372,106 +323,65 @@ class ListDataset(data.Dataset):
         labels = np.unique(slic)
 
         # Finding 'pure' regions, that is, the ones that only contain one label within.
-        pos_sp = []
-        neg_sp = []
-
-        for l in labels:
-            sp = msk[slic == l].ravel()
+        pure_regions = [[] for _ in range(self.num_classes)]
+        for label in labels:
+            sp = msk[slic == label].ravel()
             cnt = np.bincount(sp)
 
-            if len(cnt) == 1:
-                neg_sp.append(l)
-            else:
-                if cnt[0] == 0:
-                    pos_sp.append(l)
+            for c in range(self.num_classes):
+                if (cnt[c] if c < len(cnt) else None) == cnt.sum():
+                    pure_regions[c].append(label)
 
-        neg_sp = np.array(neg_sp)
-        pos_sp = np.array(pos_sp)
+        for (c, pure_region) in enumerate(pure_regions):
+            # Random permutation to pure region.
+            perm = np.random.permutation(len(pure_region))
 
-        if sparsity == 'random':
-
-            # Randomly choosing sparsity (number of slic regions -- [0..1]).
-            sparsity = np.random.random()
-
-            # Random permutation to negative regions.
-            perm_neg = np.random.permutation(len(neg_sp))
-
-            # Random permutation to positive regions.
-            perm_pos = np.random.permutation(len(pos_sp))
-
-        elif isinstance(sparsity, float) and sparsity > 0:
-
-            # Fixing seed.
-            np.random.seed(index)
-            # Predefined permutation to negative regions (fixed by seed).
-            perm_neg = np.random.permutation(len(neg_sp))
-
-            # Fixing seed.
-            np.random.seed(index)
-            # Predefined permutation to positive regions (fixed by seed).
-            perm_pos = np.random.permutation(len(pos_sp))
-
-        # Only keeping the selected k regions.
-        for sp in neg_sp[perm_neg[:max(1, round(sparsity * len(perm_neg)))]]:
-            new_msk[slic == sp] = 0
-        for sp in pos_sp[perm_pos[:max(1, round(sparsity * len(perm_pos)))]]:
-            new_msk[slic == sp] = 1
+            # Only keeping the selected k regions.
+            perm_last_idx = max(1, round(sparsity_num * len(perm)))
+            for sp in np.array(pure_region)[perm[:perm_last_idx]]:
+                new_msk[slic == sp] = c
 
         return new_msk
 
     # Function to load images and masks
     # May need adaptation to your data
-    # Returns: img, mask, (path_to_img, img_filename)
+    # Returns: img, mask, img_filename
     def get_data(self, index):
         img_path, msk_path = self.imgs[index]
 
         # Reading images.
-        img = io.imread(img_path, as_gray=True)
-        msk = io.imread(msk_path)
-
-        # Removing unwanted channels. For the case of RGB images.
-        if len(img.shape) > 2:
-            img = img[:, :, 0]
-
-        if len(msk.shape) > 2:
-            msk = msk[:, :, 0]
-
+        img = io.imread(img_path)
         img = img_as_float(img)
+        msk = io.imread(msk_path, as_gray=True)
+        # msk = msk / np.min(np.trim_zeros(np.unique(msk)))
 
-        # Resising images.
-        if msk.shape[0] > self.resize_to[0] * 2:
-            d_res = (self.resize_to[0]*2, self.resize_to[1]*2)
-            img = transform.resize(img, d_res, order=1, preserve_range=True)
-            msk = transform.resize(msk, d_res, order=0, preserve_range=True)
-
-        img = transform.resize(img, self.resize_to,
-                               order=1, preserve_range=True)
-        msk = transform.resize(msk, self.resize_to,
-                               order=0, preserve_range=True)
+        img = transform.resize(img, self.resize_to, order=1, preserve_range=True)
+        msk = transform.resize(msk, self.resize_to, order=0, preserve_range=True)
 
         img = img.astype(np.float32)
-        msk = msk.astype(np.int64)
-
-        # Binarizing mask.
-        if self.num_classes == 2:
-            msk[msk != 0] = 1
+        msk[msk != 0] = 1
+        msk = np.round(msk).astype(np.int64)
 
         # Splitting path.
-        spl = img_path.split('/')
+        img_filename = os.path.split(img_path)[-1]
 
-        return img, msk, spl
+        # remove extension from filename
+        img_filename = ".".join(img_filename.split(".")[:-1])
 
-    def norm(self, img):
+        return img, msk, img_filename
+
+    @staticmethod
+    def norm(img):
         normalized = np.zeros(img.shape)
         if len(img.shape) == 2:
             normalized = (img - img.mean()) / img.std()
         else:
             for b in range(img.shape[2]):
-                normalized[:, :, b] = (
-                    img[:, :, b] - img[:, :, b].mean()) / img[:, :, b].std()
+                normalized[:, :, b] = (img[:, :, b] - img[:, :, b].mean()) / img[:, :, b].std()
         return normalized
 
-    def torch_channels(self, img):
+    @staticmethod
+    def torch_channels(img):
         if len(img.shape) == 2:
             img = np.expand_dims(img, axis=0)
         else:
@@ -480,7 +390,9 @@ class ListDataset(data.Dataset):
 
     def __getitem__(self, index):
 
-        img, msk, spl = self.get_data(index)
+        img, msk, img_filename = self.get_data(index)
+
+        sparse_msk = np.copy(msk)
 
         if self.sparsity_mode == 'random':
 
@@ -519,8 +431,6 @@ class ListDataset(data.Dataset):
         elif self.sparsity_mode == 'skels':
             sparse_msk = self.sparse_skels(
                 msk, sparsity=self.sparsity_param, index=index)
-        elif self.sparsity_mode == 'dense':
-            sparse_msk = np.copy(msk)
 
         # Normalization.
         img = self.norm(img)
@@ -535,7 +445,7 @@ class ListDataset(data.Dataset):
         sparse_msk = torch.from_numpy(sparse_msk).type(torch.LongTensor)
 
         # Returning to iterator.
-        return img, msk, sparse_msk, spl[-1]
+        return img, msk, sparse_msk, img_filename
 
     def __len__(self):
         return len(self.imgs)
