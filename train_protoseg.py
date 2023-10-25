@@ -1,23 +1,10 @@
-import datetime
-import os
-import random
-import time
-import gc
 import sys
-import numpy as np
-import skimage
-import csv
 
 from skimage import io
 
-from sklearn import metrics
-
-import torch
 from torch import optim
-from torch.autograd import Variable
 from torch.backends import cudnn
-from torch.utils.data import DataLoader
-import torch.nn.functional as F
+from torch.nn import functional
 
 from config import Config
 from data import list_dataset, list_loader
@@ -27,7 +14,11 @@ from utils import *
 cudnn.benchmark = True
 
 settings = Config()
-general_params, fewshot_params, task_dicts, args, datainfo = settings['GENERAL'], settings['FEW-SHOT'], settings['TASKS']['task_dicts'], settings['TRAINING'], settings['DATA']
+general_params = settings['GENERAL']
+fewshot_params = settings['FEW-SHOT']
+task_dicts = settings['TASKS']['task_dicts']
+args = settings['TRAINING']
+datainfo = settings['DATA']
 
 # Predefining directories.
 ckpt_path = general_params['ckpt_path']
@@ -45,31 +36,24 @@ listLoader = list_loader.ListLoader(fewshot_params)
 # Setting experiment name.
 exp_name = 'protoseg_multiple_' + conv_name + '_' + data_name + '_' + task_name + '_f' + str(fold_name)
 
+
 # Function to get the number of annotated pixels for each class
-def get_num_samples(targets, num_classes, dtype=None, ignore_index=-1):
+def get_num_samples(targets, num_classes, dtype=None):
     batch_size = targets.size(0)
-    need_filter = ignore_index in torch.unique(targets).detach().cpu().numpy().tolist()
-    
+
     with torch.no_grad():
-        
-        ones = torch.ones_like(targets, dtype=dtype)
-        num_samples = ones.new_zeros((batch_size, num_classes))
-        
-        if need_filter:           
-            for i in range(batch_size):
-                
-                trg_i = targets[i]
-                
-                num_samples[i, 0] += trg_i[trg_i == 0].size(0)
-                num_samples[i, 1] += trg_i[trg_i == 1].size(0)
-                
-        else:
-            
-            num_samples.scatter_add_(1, targets, ones)
-    
+        num_samples = targets.new_zeros((batch_size, num_classes), dtype=dtype)
+
+        for i in range(batch_size):
+            trg_i = targets[i]
+
+            for c in range(num_classes):
+                num_samples[i, c] += trg_i[trg_i == c].size(0)
+
     return num_samples
 
-def get_prototypes(embeddings, targets, num_classes, ignore_index=-1):
+
+def get_prototypes(embeddings, targets, num_classes):
     """Compute the prototypes (the mean vector of the embedded training/support
     points belonging to its class) for each classes in the task.
     Parameters
@@ -88,34 +72,26 @@ def get_prototypes(embeddings, targets, num_classes, ignore_index=-1):
         A tensor containing the prototypes for each class. This tensor has shape
         `(batch_size, num_classes, embedding_size)`.
     """
-    need_filter = ignore_index in torch.unique(targets).detach().cpu().numpy().tolist()
-    
     batch_size, embedding_size = embeddings.size(0), embeddings.size(-1)
-    
+
     num_samples = get_num_samples(targets, num_classes, dtype=embeddings.dtype)
     num_samples.unsqueeze_(-1)
     num_samples = torch.max(num_samples, torch.ones_like(num_samples))
 
     prototypes = embeddings.new_zeros((batch_size, num_classes, embedding_size))
     indices = targets.unsqueeze(-1).expand_as(embeddings)
-    
-    if need_filter:
-        for i in range(indices.size(0)):
-            
-            ind_i = indices[i]
-            trg_i = targets[i]
-            emb_i = embeddings[i]
-            
-            prototypes[i, 0] += torch.sum(emb_i[trg_i == 0], dim=0)
-            prototypes[i, 1] += torch.sum(emb_i[trg_i == 1], dim=0)
-            
-        prototypes.div_(num_samples)
 
-    else:
-        
-        prototypes.scatter_add_(1, indices, embeddings).div_(num_samples)
+    for i in range(indices.size(0)):
+        trg_i = targets[i]
+        emb_i = embeddings[i]
+
+        for c in range(num_classes):
+            prototypes[i, c] += torch.sum(emb_i[trg_i == c], dim=0)
+
+    prototypes.div_(num_samples)
 
     return prototypes
+
 
 def prototypical_loss(prototypes, embeddings, targets, **kwargs):
     """Compute the loss (i.e. negative log-likelihood) for the prototypical 
@@ -138,9 +114,10 @@ def prototypical_loss(prototypes, embeddings, targets, **kwargs):
     """
     squared_distances = torch.sum((prototypes.unsqueeze(2)
                                    - embeddings.unsqueeze(1)) ** 2, dim=-1)
-    return F.cross_entropy(-squared_distances, targets, **kwargs)
+    return functional.cross_entropy(-squared_distances, targets, **kwargs)
 
-def get_predictions(prototypes, embeddings, targets):
+
+def get_predictions(prototypes, embeddings):
     """Compute the accuracy of the prototypical network on the test/query points.
     Parameters
     ----------
@@ -150,9 +127,6 @@ def get_predictions(prototypes, embeddings, targets):
     embeddings : `torch.FloatTensor` instance
         A tensor containing the embeddings of the query points. This tensor has 
         shape `(meta_batch_size, num_examples, embedding_size)`.
-    targets : `torch.LongTensor` instance
-        A tensor containing the targets of the query points. This tensor has 
-        shape `(meta_batch_size, num_examples)`.
     Returns
     -------
     accuracy : `torch.FloatTensor` instance
@@ -165,14 +139,15 @@ def get_predictions(prototypes, embeddings, targets):
 
 
 # Main function.
-def main(args):
+def main():
 
     # Setting network architecture.
-    if (conv_name == 'unet'):
-
-        net = UNet(datainfo['num_channels'], datainfo['num_class']).cuda()
+    net = UNet(datainfo['num_channels'], datainfo['num_class'])
+    if args["use_gpu"]:
+        net = net.cuda()
 
     print(net)
+    
     n_params = sum(p.numel() for p in net.parameters() if p.requires_grad)
     print('# of parameters: ' + str(n_params))
     sys.stdout.flush()
@@ -182,9 +157,42 @@ def main(args):
     # Setting meta datasets.
     print('Setting meta-dataset loaders...')
     sys.stdout.flush()
-    meta_train_set = [list_dataset.ListDataset('meta_train', d['domain'], d['task'], fold_name, resize_to, num_shots=-1, sparsity_mode='random', imgtype=datainfo['imgtype']) for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
-    
-    meta_test_set = [list_dataset.ListDataset('meta_test', d['domain'], d['task'], fold_name, resize_to, num_shots=-1, sparsity_mode='dense', imgtype=datainfo['imgtype']) for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
+    # meta_train_set = [list_dataset.ListDataset('meta_train',
+    #                                            d['domain'],
+    #                                            d['task'],
+    #                                            fold_name,
+    #                                            resize_to,
+    #                                            num_shots=-1,
+    #                                            sparsity_mode='random',
+    #                                            imgtype=datainfo['imgtype'])
+    #                   for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
+    # meta_test_set = [list_dataset.ListDataset('meta_test',
+    #                                           d['domain'],
+    #                                           d['task'],
+    #                                           fold_name,
+    #                                           resize_to,
+    #                                           num_shots=-1,
+    #                                           sparsity_mode='dense',
+    #                                           imgtype=datainfo['imgtype'])
+    #                  for d in task_dicts if d['domain'] != data_name or d['task'] != task_name]
+    meta_train_set = [list_dataset.ListDataset('meta_train',
+                                               d['domain'],
+                                               d['task'],
+                                               fold_name,
+                                               resize_to,
+                                               num_shots=-1,
+                                               sparsity_mode='random',
+                                               imgtype=datainfo['imgtype'])
+                      for d in task_dicts]
+    meta_test_set = [list_dataset.ListDataset('meta_test',
+                                              d['domain'],
+                                              d['task'],
+                                              fold_name,
+                                              resize_to,
+                                              num_shots=-1,
+                                              sparsity_mode='dense',
+                                              imgtype=datainfo['imgtype'])
+                     for d in task_dicts]
 
     # Setting tuning and testing loaders.
     print('Setting tuning loaders...')
@@ -205,7 +213,10 @@ def main(args):
     ], betas=(args['momentum'], 0.99))
     
     # Setting scheduler.
-    scheduler = optim.lr_scheduler.StepLR(meta_optimizer, args['lr_scheduler_step_size'], gamma=args['lr_scheduler_gamma'], last_epoch=-1)
+    scheduler = optim.lr_scheduler.StepLR(meta_optimizer,
+                                          args['lr_scheduler_step_size'],
+                                          gamma=args['lr_scheduler_gamma'],
+                                          last_epoch=-1)
 
     # Loading optimizer state in case of resuming training.
     if args['snapshot'] == '':
@@ -227,16 +238,24 @@ def main(args):
     for epoch in range(curr_epoch, args['epoch_num'] + 1):
 
         # Meta training on source datasets.
-        meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, epoch % args['test_freq'] == 0, args)
+        meta_train_test(meta_train_set,
+                        meta_test_set,
+                        net,
+                        meta_optimizer,
+                        epoch,
+                        epoch % args['test_freq'] == 0)
         
         if epoch % args['test_freq'] == 0:
             
-            run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name)
+            run_sparse_tuning(loader_dict,
+                              net,
+                              epoch)
             
         scheduler.step()
 
+
 # Training function.
-def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, save_model, args):
+def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, save_model):
     
     # Setting network for training mode.
     net.train()
@@ -266,7 +285,11 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
             x_test = []
             y_test = []
             
-            x_tr, y_tr, x_ts, y_ts = prepare_meta_batch(meta_train_set, meta_test_set, index, args['batch_size'])
+            x_tr, y_tr, x_ts, y_ts = prepare_meta_batch(meta_train_set,
+                                                        meta_test_set,
+                                                        index,
+                                                        args['batch_size'],
+                                                        args['use_gpu'])
             
             x_train.append(x_tr)
             y_train.append(y_tr)
@@ -291,15 +314,22 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
             emb_train = net(x_train)
             emb_test = net(x_test)
             
-            emb_train_linear = emb_train.permute(0, 2, 3, 1).view(emb_train.size(0), emb_train.size(2) * emb_train.size(3), emb_train.size(1))
-            emb_test_linear = emb_test.permute(0, 2, 3, 1).view(emb_test.size(0), emb_test.size(2) * emb_test.size(3), emb_test.size(1))
+            emb_train_linear = emb_train.permute(0, 2, 3, 1).view(
+                emb_train.size(0), emb_train.size(2) * emb_train.size(3), emb_train.size(1))
+            emb_test_linear = emb_test.permute(0, 2, 3, 1).view(
+                emb_test.size(0), emb_test.size(2) * emb_test.size(3), emb_test.size(1))
             
             y_train_linear = y_train.view(y_train.size(0), -1)
             y_test_linear = y_test.view(y_test.size(0), -1)
             
-            prototypes = get_prototypes(emb_train_linear, y_train_linear, list_dataset.num_classes)
+            prototypes = get_prototypes(emb_train_linear,
+                                        y_train_linear,
+                                        datainfo['num_class'])
             
-            outer_loss = prototypical_loss(prototypes, emb_test_linear, y_test_linear, ignore_index=-1)
+            outer_loss = prototypical_loss(prototypes,
+                                           emb_test_linear,
+                                           y_test_linear,
+                                           ignore_index=-1)
                 
             ##########################################################################
             # End of prototyping. ####################################################
@@ -327,7 +357,8 @@ def meta_train_test(meta_train_set, meta_test_set, net, meta_optimizer, epoch, s
     print('--------------------------------------------------------------------')
     sys.stdout.flush()
     
-def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
+    
+def run_sparse_tuning(loader_dict, net, epoch):
     
     # Tuning/testing on points.
     for dict_points in loader_dict['points']:
@@ -338,7 +369,11 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
         print('    Evaluating \'points\' (%d-shot, %d-points)...' % (n_shots, sparsity))
         sys.stdout.flush()
 
-        tune_train_test(dict_points['train'], dict_points['test'], net, meta_optimizer, epoch, args, task_name, 'points_(%d-shot_%d-points)' % (n_shots, sparsity))
+        tune_train_test(dict_points['train'],
+                        dict_points['test'],
+                        net,
+                        epoch,
+                        'points_(%d-shot_%d-points)' % (n_shots, sparsity))
 
     # Tuning/testing on contours.
     for dict_contours in loader_dict['contours']:
@@ -349,7 +384,11 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
         print('    Evaluating \'contours\' (%d-shot, %.2f-density)...' % (n_shots, sparsity))
         sys.stdout.flush()
 
-        tune_train_test(dict_contours['train'], dict_contours['test'], net, meta_optimizer, epoch, args, task_name, 'contours_(%d-shot_%.2f-density)' % (n_shots, sparsity))
+        tune_train_test(dict_contours['train'],
+                        dict_contours['test'],
+                        net,
+                        epoch,
+                        'contours_(%d-shot_%.2f-density)' % (n_shots, sparsity))
 
     # Tuning/testing on grid.
     for dict_grid in loader_dict['grid']:
@@ -360,7 +399,11 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
         print('    Evaluating \'grid\' (%d-shot, %d-spacing)...' % (n_shots, sparsity))
         sys.stdout.flush()
 
-        tune_train_test(dict_grid['train'], dict_grid['test'], net, meta_optimizer, epoch, args, task_name, 'grid_(%d-shot_%d-spacing)' % (n_shots, sparsity))
+        tune_train_test(dict_grid['train'],
+                        dict_grid['test'],
+                        net,
+                        epoch,
+                        'grid_(%d-shot_%d-spacing)' % (n_shots, sparsity))
 
     # Tuning/testing on regions.
     for dict_regions in loader_dict['regions']:
@@ -371,7 +414,11 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
         print('    Evaluating \'regions\' (%d-shot, %.2f-regions)...' % (n_shots, sparsity))
         sys.stdout.flush()
 
-        tune_train_test(dict_regions['train'], dict_regions['test'], net, meta_optimizer, epoch, args, task_name, 'regions_(%d-shot_%.2f-regions)' % (n_shots, sparsity))
+        tune_train_test(dict_regions['train'],
+                        dict_regions['test'],
+                        net,
+                        epoch,
+                        'regions_(%d-shot_%.2f-regions)' % (n_shots, sparsity))
 
     # Tuning/testing on skels.
     for dict_skels in loader_dict['skels']:
@@ -382,19 +429,28 @@ def run_sparse_tuning(loader_dict, net, meta_optimizer, epoch, task_name):
         print('    Evaluating \'skels\' (%d-shot, %.2f-skels)...' % (n_shots, sparsity))
         sys.stdout.flush()
 
-        tune_train_test(dict_skels['train'], dict_skels['test'], net, meta_optimizer, epoch, args, task_name, 'skels_(%d-shot_%.2f-skels)' % (n_shots, sparsity))
+        tune_train_test(dict_skels['train'],
+                        dict_skels['test'],
+                        net,
+                        epoch,
+                        'skels_(%d-shot_%.2f-skels)' % (n_shots, sparsity))
 
     # Tuning/testing on dense.
     for dict_dense in loader_dict['dense']:
 
         n_shots = dict_dense['n_shots']
 
-        print('    Evaluating \'dense\' (%d-shot)...' % (n_shots))
+        print('    Evaluating \'dense\' (%d-shot)...' % n_shots)
         sys.stdout.flush()
 
-        tune_train_test(dict_dense['train'], dict_dense['test'], net, meta_optimizer, epoch, args, task_name, 'dense_(%d-shot)' % (n_shots))
+        tune_train_test(dict_dense['train'],
+                        dict_dense['test'],
+                        net,
+                        epoch,
+                        'dense_(%d-shot)' % n_shots)
 
-def tune_train_test(tune_train_loader, tune_test_loader, net, meta_optimizer, epoch, args, task_name, sparsity_mode):
+
+def tune_train_test(tune_train_loader, tune_test_loader, net, epoch, sparsity_mode):
     
     # Creating output directories.
     if epoch == args['epoch_num']:
@@ -417,66 +473,64 @@ def tune_train_test(tune_train_loader, tune_test_loader, net, meta_optimizer, ep
         for i, data in enumerate(tune_train_loader):
 
             # Obtaining images, dense labels, sparse labels and paths for batch.
-            x_tr, y_dense, y_tr, img_name = data
+            x_tr, _, y_tr, _ = data
 
             # Casting tensors to cuda.
-            x_tr = x_tr.cuda()
-            y_tr = y_tr.cuda()
+            if args["use_gpu"]:
+                x_tr = x_tr.cuda()
+                y_tr = y_tr.cuda()
 
             emb_tr = net(x_tr)
 
-            emb_train_linear = emb_tr.permute(0, 2, 3, 1).view(emb_tr.size(0), emb_tr.size(2) * emb_tr.size(3), emb_tr.size(1))
+            emb_train_linear = emb_tr.permute(0, 2, 3, 1).view(
+                emb_tr.size(0), emb_tr.size(2) * emb_tr.size(3), emb_tr.size(1))
             
             y_train_linear = y_tr.view(y_tr.size(0), -1)
 
             emb_train_list.append(emb_train_linear)
             y_train_list.append(y_train_linear)
 
-        emb_tr = torch.stack(emb_train_list)
-        y_tr = torch.stack(y_train_list)
+        emb_tr = torch.vstack(emb_train_list)
+        y_tr = torch.vstack(y_train_list)
         
-        emb_tr = emb_tr.view(emb_tr.size(0) * emb_tr.size(1), emb_tr.size(2), emb_tr.size(3))
-        y_tr = y_tr.view(y_tr.size(0) * y_tr.size(1), y_tr.size(2))
-        
-        prototypes = get_prototypes(emb_tr, y_tr, list_dataset.num_classes)
-        
-        # Creating lists for tune train embeddings and labels.
-        emb_test_list = []
-        y_test_list = []
-        
+        prototypes = get_prototypes(emb_tr, y_tr, datainfo['num_class'])
+
         # Lists for whole epoch loss.
         labs_all, prds_all = [], []
         
         # Iterating over tuning test batches.
         for i, data in enumerate(tune_test_loader):
-            
             # Obtaining images, dense labels, sparse labels and paths for batch.
             x_ts, y_ts, _, img_name = data
             
             # Casting tensors to cuda.
-            x_ts = x_ts.cuda()
-            y_ts = y_ts.cuda()
+            if args["use_gpu"]:
+                x_ts = x_ts.cuda()
+                y_ts = y_ts.cuda()
             
             emb_ts = net(x_ts)
             
-            emb_test_linear = emb_ts.permute(0, 2, 3, 1).view(emb_ts.size(0), emb_ts.size(2) * emb_ts.size(3), emb_ts.size(1))
+            emb_test_linear = emb_ts.permute(0, 2, 3, 1).view(
+                emb_ts.size(0), emb_ts.size(2) * emb_ts.size(3), emb_ts.size(1))
             
-            y_test_linear = y_ts.view(y_ts.size(0), -1)
-            
-            p_test_linear = get_predictions(prototypes, emb_test_linear, y_test_linear)
+            p_test_linear = get_predictions(prototypes, emb_test_linear)
             
             p_test = p_test_linear.view(p_test_linear.size(0), y_ts.size(1), y_ts.size(2))
             
             # Taking mode of predictions.
-            p_full = p_test.sum(dim=0)
-            p_full = p_full > (p_test.size(0) / 2.0)
+            p_full, _ = torch.mode(p_test, dim=0)
             
             labs_all.append(y_ts.cpu().numpy().squeeze())
             prds_all.append(p_full.cpu().numpy().squeeze())
 
             # Saving predictions.
             if epoch == args['epoch_num']:
-                io.imsave(os.path.join(outp_path, exp_name, sparsity_mode + '_test_epoch_' + str(epoch), img_name[0]), skimage.img_as_ubyte(p_full.cpu().numpy().astype(np.uint8).squeeze() * 255))
+                stored_pred = p_full.cpu().numpy().squeeze()
+                stored_pred = (stored_pred * (255 / stored_pred.max())).astype(np.uint8)
+                io.imsave(
+                    os.path.join(outp_path, exp_name, sparsity_mode + '_test_epoch_' + str(epoch),
+                                 img_name[0] + '.png'),
+                    stored_pred)
             
     # Converting to numpy for computing metrics.
     labs_np = np.asarray(labs_all).ravel()
@@ -499,10 +553,17 @@ def tune_train_test(tune_train_loader, tune_test_loader, net, meta_optimizer, ep
             _, y_dense, y_sparse, img_name = data
 
             for j in range(len(img_name)):
-
-                io.imsave(os.path.join(outp_path, exp_name, sparsity_mode + '_train_epoch_' + str(epoch), img_name[j].replace('.png', '_dense.png')), skimage.img_as_ubyte(y_dense[j].cpu().squeeze().numpy() * 255))
-                io.imsave(os.path.join(outp_path, exp_name, sparsity_mode + '_train_epoch_' + str(epoch), img_name[j].replace('.png', '_sparse.png')), skimage.img_as_ubyte((y_sparse[j].cpu().squeeze().numpy() + 1) * 127))
+                stored_dense = y_dense[j].cpu().squeeze().numpy()
+                stored_dense = (stored_dense * (255 / stored_dense.max())).astype(np.uint8)
+                stored_sparse = y_sparse[j].cpu().squeeze().numpy() + 1
+                stored_sparse = (stored_sparse * (255 / stored_sparse.max())).astype(np.uint8)
+                io.imsave(os.path.join(outp_path, exp_name, sparsity_mode + '_train_epoch_' + str(epoch),
+                                       img_name[j] + '_dense.png'),
+                          stored_dense)
+                io.imsave(os.path.join(outp_path, exp_name, sparsity_mode + '_train_epoch_' + str(epoch), 
+                                       img_name[j] + '_sparse.png'),
+                          stored_sparse)
                 
 
 if __name__ == '__main__':
-    main(args)
+    main()
